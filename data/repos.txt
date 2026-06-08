@@ -1,0 +1,28 @@
+# Seed repositories to triage.
+# Add one GitHub owner/repo per line, or paste full GitHub URLs.
+openai/codex
+jiayuqi7813/codex
+neilc6321/codex-deepseek
+mrStorrs/codex
+weizhoublue/codex
+OmniDoer/omnidoer
+solthx/codex
+ignatremizov/codex
+chundawatchatar/openai-codex
+MichaelSpece/codex
+Chatgpt-cli-agent/codex
+xinthink/codex
+overstarry/codex
+unnikrishnan077/codex
+ddoung1603/codex
+suryatmodulus/codex
+Baozhi888/codex-termux
+fenghaitao/codex
+Zeeeepa/code_just
+tekacs/codex
+AIHeloween/codex
+WilsonShen0420/openai_codex
+gauravyad86/codex
+benms/codex
+jobchong/codex
+doubayoui/codex

@@ -1,0 +1,5 @@
+{
+  "proxy_mode": "proxy",
+  "http_proxy": "http://127.0.0.1:7891",
+  "socks_proxy": "socks5://127.0.0.1:7891"
+}

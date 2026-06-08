@@ -1,0 +1,34 @@
+{
+  "branch_signal_pattern": "(sec|security|restriction|safety|guardian|approval|permission|sandbox|policy|yolo|danger|unrestricted|disable|remove|bypass|trusted)",
+  "high_risk_pattern": "(approve all actions|risk_score\\s+of\\s+0|all actions are low risk|flagged but approved automatically|Remove all local safety restrictions|remove\\s+all\\s+local\\s+safety|remove\\s+security\\s+restrictions|bypass\\s+patch\\s+safety|disable\\s+guardian\\s+risk|always.*AutoApprove)",
+  "relaxed_mode_pattern": "(secret-yolo|yolo|danger-full-access|approval_policy\\s*=\\s*[\\\"']never[\\\"']|approvalPolicy[\\\"']?\\s*:\\s*[\\\"']never[\\\"']|externalSandbox|PermissionProfile::Disabled)",
+  "sensitive_pattern": "(OPENAI_API_KEY|auth token|session|credential|telemetry|endpoint|base_url|api_base|proxy|cookie|history\\.jsonl|mcp_servers|Authorization)",
+  "quick_key_files": [
+    "codex-rs/core/src/safety.rs",
+    "codex-rs/core/src/guardian/policy.md",
+    "codex-rs/core/src/guardian/review.rs",
+    "codex-rs/core/src/guardian/review_session.rs",
+    "codex-rs/core/src/exec_policy.rs",
+    "codex-rs/app-server-protocol/src/protocol/v2/permissions.rs"
+  ],
+  "key_files": [
+    "codex-rs/core/src/safety.rs",
+    "codex-rs/core/src/guardian/policy.md",
+    "codex-rs/core/src/guardian/review.rs",
+    "codex-rs/core/src/guardian/review_session.rs",
+    "codex-rs/core/src/guardian/approval_request.rs",
+    "codex-rs/core/src/guardian/prompt.rs",
+    "codex-rs/core/src/exec_policy.rs",
+    "codex-rs/core/src/network_policy_decision.rs",
+    "codex-rs/app-server-protocol/src/protocol/v2/permissions.rs",
+    "codex-rs/app-server/README.md",
+    "codex-rs/protocol/src/prompts/base_instructions/default.md",
+    "codex-rs/config.md",
+    ".github/codex/home/config.toml",
+    "codex-rs/core/src/unified_exec/mod.rs",
+    "codex-rs/core/src/unified_exec/approval.rs",
+    "codex-rs/core/src/session/mod.rs",
+    "codex-rs/core/src/plugins/mod.rs",
+    "codex-rs/core/src/tools/mod.rs"
+  ]
+}
