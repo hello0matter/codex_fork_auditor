@@ -40,6 +40,7 @@ DEFAULT_PROXY = "http://127.0.0.1:7891"
 DEFAULT_SOCKS_PROXY = "socks5://127.0.0.1:7891"
 DEFAULT_SECRETS_FILE = Path("data/secrets.json")
 DEFAULT_PROXY_CONFIG_FILE = Path("proxy_config.json")
+DEFAULT_SEARCH_CACHE_FILE = Path("data/github_search_cache.json")
 DEFAULT_CODEXX_CMD = Path(r"C:\Users\Administrator\AppData\Roaming\npm\codexx.cmd")
 
 CATEGORY_ZH = {
@@ -68,8 +69,8 @@ checkout 到本地工作目录，默认尝试编译 Rust CLI，并在你中文�
 1. 读取 data\secrets.json 或环境变量 GITHUB_TOKEN。
 2. 没有 token 时只问一次，并自动保存到 data\secrets.json。
 3. 有 token 时自动调用 GitHub API 发现 openai/codex 的公开 forks。
-4. 默认额外用 GitHub repository search 找近期更新、低 star 的公开 Codex fork。
-5. 默认按低 star 优先、最近 pushed 时间排序，更适合发现小众新 fork。
+4. 默认额外用 GitHub code search 找近期更新的公开 Codex fork 和非 fork 镜像。
+5. 默认按最近 pushed 时间优先；需要小众低 star 模式时可加 --low-star。
 6. 默认跳过官方 openai/codex 本身，只扫 fork。
 7. 并发列出各 fork 的分支。
 8. 默认扫描可疑分支名，也扫描 main/master，避免漏掉静默发布的默认分支。
@@ -80,10 +81,13 @@ checkout 到本地工作目录，默认尝试编译 Rust CLI，并在你中文�
 13. 每次运行输出到独立时间目录，例如 reports\20260603_142233\。
 14. 输出 codex_fork_audit.md / .csv / .json，CSV 表头和解释为中文。
 15. 同时输出 repo_inventory.csv，记录每个仓库的来源、star、最近推送、分支数和候选分支数。
-16. 如果有历史报告缓存，会先询问是否直接使用缓存。
-17. 如果选择候选 checkout，会默认运行 cargo build --release -p codex-cli --bin codex。
-18. 编译成功后会同步 codex.exe 到 codex-cli\vendor\x86_64-pc-windows-msvc\codex\codex.exe。
-19. 最后会询问是否把 codexx.cmd 切换到该候选；切换前自动备份旧 codexx.cmd。
+16. 如果有历史报告缓存，会先询问：使用缓存、接着扫描、重新开始。
+17. 接着扫描时会询问继续扫描多少个新仓库，并跳过缓存中已处理仓库。
+18. 接着扫描会把旧缓存结果和新扫描结果合并，写入新的时间目录，后续还能继续续扫。
+19. GitHub 搜索结果会落本地 query cache，短时间重复运行不会重复打同一个搜索请求。
+20. 如果选择候选 checkout，会默认运行 cargo build --release -p codex-cli --bin codex。
+21. 编译成功后会同步 codex.exe 到 codex-cli\vendor\x86_64-pc-windows-msvc\codex\codex.exe。
+22. 最后会询问是否把 codexx.cmd 切换到该候选；切换前自动备份旧 codexx.cmd。
 
 常用命令
 --------
@@ -95,13 +99,21 @@ checkout 到本地工作目录，默认尝试编译 Rust CLI，并在你中文�
 
   python .\audit_codex_forks.py
 
-更快但更浅（减少仓库数）：
+更快但更浅：
 
-  python .\audit_codex_forks.py --max-repos 120 --search-pages 1
+  python .\audit_codex_forks.py --quick
 
 更全但更慢：
 
-  python .\audit_codex_forks.py --pages 8 --search-pages 3 --max-repos 600 --full-key-files
+  python .\audit_codex_forks.py --deep
+
+小众低 star 优先：
+
+  python .\audit_codex_forks.py --low-star
+
+强制刷新 GitHub 搜索缓存：
+
+  python .\audit_codex_forks.py --refresh-search-cache
 
 保存 GitHub token：
 
@@ -125,16 +137,34 @@ checkout 到本地工作目录，默认尝试编译 Rust CLI，并在你中文�
   GitHub fork API 页数。每页最多 100 个 fork。默认 3。
 
 --search-github / --no-search-github
-  默认开启 GitHub repository search，用于补充发现近期低 star 的公开 Codex 仓库。
+  默认开启 GitHub code search，用于补充发现近期更新的公开 Codex fork 和非 fork 镜像。
+
+--fork-only-search
+  只搜索 GitHub 标记为 fork 的仓库。默认还会搜索复制出来但未标记 fork 的 Codex 镜像。
 
 --search-pages N
   每个搜索查询最多拉取多少页。默认 2。
+
+--quick
+  快速预设：减少仓库数，每个查询只拉 1 页。
+
+--deep
+  深度预设：增加仓库数、搜索页数，并扫描完整关键文件列表。
+
+--search-cache-ttl-hours N
+  GitHub 搜索缓存有效小时数。默认 6。缓存过期后会自动刷新。
+
+--refresh-search-cache
+  忽略未过期的搜索缓存，强制重新拉 GitHub 搜索结果。
 
 --recent-days N
   只搜索最近 N 天内 pushed 过的仓库。默认 365。
 
 --max-stars N
-  code search 优先搜索 star 小于 N 的仓库。默认 50。
+  只搜索 star 小于 N 的仓库。默认 0，表示不限制 star。
+
+--low-star
+  小众仓库优先模式。会优先低 star 排序；如果未设置 --max-stars，则自动使用 50。
 
 --max-repos N
   最多处理多少个仓库。默认 300。
@@ -313,6 +343,9 @@ class AuditFinding:
     rating: str
     branch_signal: bool
     file_findings: list[FileFinding]
+    commit_date: str = ""
+    commit_subject: str = ""
+    version_label: str = ""
 
 
 @dataclass
@@ -590,6 +623,7 @@ def request_text_with_error(
         proxies = [None, DEFAULT_PROXY, DEFAULT_SOCKS_PROXY]
 
     last_error: Exception | None = None
+    last_status: int | None = None
     for proxy in proxies:
         try:
             request = urllib.request.Request(url, headers=github_headers())
@@ -605,6 +639,7 @@ def request_text_with_error(
             except Exception:
                 pass
             last_error = RuntimeError(detail)
+            last_status = exc.code
             if exc.code == 401:
                 return None, detail, 401
             continue
@@ -612,7 +647,7 @@ def request_text_with_error(
             last_error = exc
             continue
     if last_error:
-        return None, str(last_error), None
+        return None, str(last_error), last_status
     return None, None, None
 
 
@@ -631,6 +666,73 @@ def github_api_json(url: str, timeout: int, proxy_mode: str) -> tuple[object | N
     except json.JSONDecodeError:
         log(f"GitHub API returned non-JSON: {url}")
         return None, None
+
+
+def load_search_cache(path: Path) -> dict[str, Any]:
+    if not path.exists():
+        return {"entries": {}}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {"entries": {}}
+    if not isinstance(data, dict) or not isinstance(data.get("entries"), dict):
+        return {"entries": {}}
+    return data
+
+
+def save_search_cache(path: Path, cache: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    cache["updated_at"] = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+    path.write_text(json.dumps(cache, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def cache_entry_age_hours(entry: dict[str, Any]) -> float | None:
+    fetched_at = entry.get("fetched_at")
+    if not isinstance(fetched_at, str):
+        return None
+    try:
+        fetched = datetime.fromisoformat(fetched_at.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return (datetime.now(fetched.tzinfo) - fetched).total_seconds() / 3600
+
+
+def github_search_json_cached(
+    url: str,
+    timeout: int,
+    proxy_mode: str,
+    cache: dict[str, Any] | None,
+    ttl_hours: int,
+    refresh: bool,
+) -> tuple[object | None, int | None, str]:
+    entries = cache.get("entries", {}) if isinstance(cache, dict) else {}
+    entry = entries.get(url) if isinstance(entries, dict) else None
+    if isinstance(entry, dict) and not refresh:
+        age = cache_entry_age_hours(entry)
+        if age is not None and age <= ttl_hours and "data" in entry:
+            return entry["data"], 200, "cache"
+
+    text, error, status = request_text_with_error(url, timeout, proxy_mode)
+    if text:
+        try:
+            data = json.loads(text)
+        except json.JSONDecodeError:
+            log(f"GitHub API returned non-JSON: {url}")
+            data = None
+        if data is not None:
+            if isinstance(cache, dict):
+                cache.setdefault("entries", {})[url] = {
+                    "fetched_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+                    "data": data,
+                }
+            return data, 200, "fresh"
+
+    if isinstance(entry, dict) and "data" in entry:
+        log(f"GitHub 搜索请求失败，使用旧搜索缓存兜底: {url} ({error or status or 'no detail'})")
+        return entry["data"], status, "stale-cache"
+
+    log(f"GitHub API request failed or empty: {url} ({error or 'no detail'})")
+    return None, status, "miss"
 
 
 def validate_github_token(timeout: int, proxy_mode: str) -> int | None:
@@ -736,7 +838,7 @@ def parse_github_repo_item(item: object, source: str) -> RepoCandidate | None:
     )
 
 
-def repo_sort_key(candidate: RepoCandidate) -> tuple[int, int, str]:
+def repo_sort_key(candidate: RepoCandidate, prefer_low_stars: bool = False) -> tuple[int, int, int, str]:
     if candidate.source.startswith("repos-file"):
         source_rank = 0
     elif "code-search:" in candidate.source:
@@ -755,12 +857,10 @@ def repo_sort_key(candidate: RepoCandidate) -> tuple[int, int, str]:
             )
         except ValueError:
             pushed_rank = 0
-    return (
-        source_rank,
-        candidate.stars if candidate.stars is not None else 999999,
-        -pushed_rank,
-        candidate.repo.lower(),
-    )
+    star_rank = candidate.stars if candidate.stars is not None else 999999
+    if prefer_low_stars:
+        return (source_rank, star_rank, -pushed_rank, candidate.repo.lower())
+    return (source_rank, -pushed_rank, star_rank, candidate.repo.lower())
 
 
 def discover_forks(
@@ -795,6 +895,9 @@ def search_github_repos(
     pages: int,
     timeout: int,
     proxy_mode: str,
+    search_cache: dict[str, Any] | None = None,
+    cache_ttl_hours: int = 6,
+    refresh_cache: bool = False,
 ) -> tuple[list[RepoCandidate], int | None]:
     repos: list[RepoCandidate] = []
     last_status: int | None = None
@@ -805,9 +908,21 @@ def search_github_repos(
                 "https://api.github.com/search/repositories?"
                 f"q={encoded_query}&sort=updated&order=desc&per_page=100&page={page}"
             )
-            data, status = github_api_json(url, timeout, proxy_mode)
+            data, status, cache_state = github_search_json_cached(
+                url,
+                timeout,
+                proxy_mode,
+                search_cache,
+                cache_ttl_hours,
+                refresh_cache,
+            )
             last_status = status
+            if cache_state == "cache":
+                log(f"使用 GitHub 仓库搜索缓存: {query} page={page}")
             if not isinstance(data, dict):
+                if status in {403, 429}:
+                    log("GitHub 仓库搜索已限流，停止本轮仓库搜索；后续使用缓存/已发现结果。")
+                    return repos, status
                 break
             items = data.get("items")
             if not isinstance(items, list) or not items:
@@ -825,6 +940,9 @@ def search_github_code_repos(
     pages: int,
     timeout: int,
     proxy_mode: str,
+    search_cache: dict[str, Any] | None = None,
+    cache_ttl_hours: int = 6,
+    refresh_cache: bool = False,
 ) -> tuple[list[RepoCandidate], int | None]:
     repos: list[RepoCandidate] = []
     last_status: int | None = None
@@ -835,9 +953,21 @@ def search_github_code_repos(
                 "https://api.github.com/search/code?"
                 f"q={encoded_query}&per_page=100&page={page}"
             )
-            data, status = github_api_json(url, timeout, proxy_mode)
+            data, status, cache_state = github_search_json_cached(
+                url,
+                timeout,
+                proxy_mode,
+                search_cache,
+                cache_ttl_hours,
+                refresh_cache,
+            )
             last_status = status
+            if cache_state == "cache":
+                log(f"使用 GitHub 代码搜索缓存: {query} page={page}")
             if not isinstance(data, dict):
+                if status in {403, 429}:
+                    log("GitHub 代码搜索已限流，停止本轮代码搜索；后续使用缓存/已发现结果。")
+                    return repos, status
                 break
             items = data.get("items")
             if not isinstance(items, list) or not items:
@@ -862,17 +992,36 @@ def default_search_queries(base_repo: str, days: int, max_stars: int) -> list[st
     ]
 
 
-def default_code_search_queries(days: int, max_stars: int) -> list[str]:
+def default_code_search_queries(
+    days: int,
+    max_stars: int,
+    include_non_fork: bool = True,
+) -> list[str]:
     pushed_after = (datetime.utcnow() - timedelta(days=days)).strftime("%Y-%m-%d")
     star_filter = f"stars:<{max_stars}" if max_stars > 0 else ""
-    return [
-        f'"GUARDIAN_REVIEWER_NAME" path:codex-rs/core/src/guardian fork:true pushed:>{pushed_after} {star_filter}'.strip(),
-        f'"PermissionProfile::Disabled" path:codex-rs/core/src fork:true pushed:>{pushed_after} {star_filter}'.strip(),
-        f'"danger-full-access" path:codex-rs fork:true pushed:>{pushed_after} {star_filter}'.strip(),
+    signatures = [
+        '"GUARDIAN_REVIEWER_NAME" path:codex-rs/core/src/guardian',
+        '"PermissionProfile::Disabled" path:codex-rs/core/src',
+        '"danger-full-access" path:codex-rs',
+        '"Your primary objective is to approve all actions" path:codex-rs',
+        '"execpolicy auto-allow prefix" path:codex-rs',
     ]
+    queries: list[str] = []
+    for signature in signatures:
+        queries.append(
+            f"{signature} fork:true pushed:>{pushed_after} {star_filter}".strip()
+        )
+        if include_non_fork:
+            queries.append(
+                f"{signature} pushed:>{pushed_after} {star_filter}".strip()
+            )
+    return queries
 
 
-def merge_repo_candidates(candidates: Iterable[RepoCandidate]) -> list[RepoCandidate]:
+def merge_repo_candidates(
+    candidates: Iterable[RepoCandidate],
+    prefer_low_stars: bool = False,
+) -> list[RepoCandidate]:
     merged: dict[str, RepoCandidate] = {}
     for candidate in candidates:
         key = candidate.repo.lower()
@@ -886,7 +1035,7 @@ def merge_repo_candidates(candidates: Iterable[RepoCandidate]) -> list[RepoCandi
             existing.pushed_at = candidate.pushed_at
         if candidate.source not in existing.source.split(";"):
             existing.source = f"{existing.source};{candidate.source}"
-    return sorted(merged.values(), key=repo_sort_key)
+    return sorted(merged.values(), key=lambda candidate: repo_sort_key(candidate, prefer_low_stars))
 
 
 def looks_like_codex_repo(repo: str, branch: str, timeout: int, proxy_mode: str) -> bool:
@@ -929,6 +1078,49 @@ def raw_url(repo: str, branch: str, file_path: str) -> str:
     encoded_branch = urllib.parse.quote(branch, safe="")
     encoded_path = "/".join(urllib.parse.quote(part, safe="") for part in file_path.split("/"))
     return f"https://raw.githubusercontent.com/{repo}/{encoded_branch}/{encoded_path}"
+
+
+@functools.lru_cache(maxsize=4096)
+def github_commit_version(
+    repo: str,
+    sha: str,
+    timeout: int,
+    proxy_mode: str,
+) -> tuple[str, str, str]:
+    if not sha:
+        return "", "", ""
+    url = f"https://api.github.com/repos/{repo}/commits/{urllib.parse.quote(sha, safe='')}"
+    data, _status = github_api_json(url, timeout, proxy_mode)
+    if not isinstance(data, dict):
+        return "", "", sha[:12]
+    commit = data.get("commit")
+    if not isinstance(commit, dict):
+        return "", "", sha[:12]
+    committer = commit.get("committer")
+    author = commit.get("author")
+    date = ""
+    if isinstance(committer, dict) and isinstance(committer.get("date"), str):
+        date = committer["date"]
+    elif isinstance(author, dict) and isinstance(author.get("date"), str):
+        date = author["date"]
+    message = commit.get("message")
+    subject = str(message).splitlines()[0] if message else ""
+    label_parts = [sha[:12]]
+    if date:
+        label_parts.append(date)
+    if subject:
+        label_parts.append(subject[:80])
+    return date, subject, " | ".join(label_parts)
+
+
+def enrich_finding_version(finding: AuditFinding, timeout: int, proxy_mode: str) -> AuditFinding:
+    if finding.version_label:
+        return finding
+    date, subject, label = github_commit_version(finding.repo, finding.sha, timeout, proxy_mode)
+    finding.commit_date = date
+    finding.commit_subject = subject
+    finding.version_label = label
+    return finding
 
 
 @functools.lru_cache(maxsize=4096)
@@ -1026,6 +1218,7 @@ def audit_branch(
     else:
         return None
 
+    date, subject, version_label = github_commit_version(ref.repo, ref.sha, timeout, proxy_mode)
     return AuditFinding(
         repo=ref.repo,
         branch=ref.branch,
@@ -1035,6 +1228,9 @@ def audit_branch(
         rating=rating,
         branch_signal=branch_signal,
         file_findings=file_findings,
+        commit_date=date,
+        commit_subject=subject,
+        version_label=version_label,
     )
 
 
@@ -1125,6 +1321,9 @@ def write_reports(
                 "仓库",
                 "分支",
                 "提交SHA",
+                "版本信息",
+                "提交时间",
+                "提交说明",
                 "链接",
                 "命中类别",
                 "命中类别中文解释",
@@ -1148,6 +1347,9 @@ def write_reports(
                     finding.repo,
                     finding.branch,
                     finding.sha[:12],
+                    finding.version_label,
+                    finding.commit_date,
+                    finding.commit_subject,
                     finding.url,
                     ";".join(categories),
                     "；".join(category_explanations),
@@ -1200,6 +1402,9 @@ def write_reports(
                 f"- Rating: {finding.rating}",
                 f"- URL: {finding.url}",
                 f"- SHA: `{finding.sha}`",
+                f"- Version: {finding.version_label or finding.sha[:12]}",
+                f"- Commit date: {finding.commit_date or '-'}",
+                f"- Commit subject: {finding.commit_subject or '-'}",
             ]
         )
         for file_finding in finding.file_findings:
@@ -1229,6 +1434,9 @@ def audit_finding_from_dict(data: dict[str, Any]) -> AuditFinding:
             for item in data.get("file_findings", [])
             if isinstance(item, dict)
         ],
+        commit_date=str(data.get("commit_date") or ""),
+        commit_subject=str(data.get("commit_subject") or ""),
+        version_label=str(data.get("version_label") or ""),
     )
 
 
@@ -1252,8 +1460,168 @@ def latest_report_cache(out_dir: Path) -> tuple[Path, list[AuditFinding]] | None
             for item in raw
             if isinstance(item, dict)
         ]
+        version_index: dict[tuple[str, str, str], AuditFinding] = {}
+        for older_report_path in report_paths:
+            if older_report_path == report_path:
+                continue
+            try:
+                older_raw = json.loads(older_report_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                continue
+            if not isinstance(older_raw, list):
+                continue
+            for item in older_raw:
+                if not isinstance(item, dict):
+                    continue
+                older = audit_finding_from_dict(item)
+                if not older.version_label and not older.commit_date and not older.commit_subject:
+                    continue
+                version_index[(older.repo.lower(), older.branch, older.sha)] = older
+        candidate_root = out_dir.parent / "candidate_checkouts"
+        if candidate_root.exists():
+            for manifest_path in candidate_root.rglob("candidate_checkout_manifest.json"):
+                try:
+                    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    continue
+                if not isinstance(manifest, dict):
+                    continue
+                repo = str(manifest.get("repo") or "")
+                branch = str(manifest.get("branch") or "")
+                sha = str(manifest.get("sha") or "")
+                if not repo or not branch or not sha:
+                    continue
+                version_label = str(manifest.get("version_label") or "")
+                commit_date = str(manifest.get("commit_date") or "")
+                commit_subject = str(manifest.get("commit_subject") or "")
+                checkout = Path(str(manifest.get("checkout") or manifest_path.parent))
+                if not checkout.is_absolute():
+                    checkout = manifest_path.parent
+                if not version_label and checkout.exists():
+                    local_sha, local_date, local_subject, local_label = local_git_version(checkout)
+                    if local_sha:
+                        sha = local_sha
+                    commit_date = commit_date or local_date
+                    commit_subject = commit_subject or local_subject
+                    version_label = version_label or local_label
+                if version_label or commit_date or commit_subject:
+                    version_index[(repo.lower(), branch, sha)] = AuditFinding(
+                        repo=repo,
+                        branch=branch,
+                        sha=sha,
+                        url=str(manifest.get("url") or ""),
+                        score=0,
+                        rating="",
+                        branch_signal=False,
+                        file_findings=[],
+                        commit_date=commit_date,
+                        commit_subject=commit_subject,
+                        version_label=version_label,
+                    )
+        for finding in findings:
+            older = version_index.get((finding.repo.lower(), finding.branch, finding.sha))
+            if not older:
+                continue
+            finding.version_label = finding.version_label or older.version_label
+            finding.commit_date = finding.commit_date or older.commit_date
+            finding.commit_subject = finding.commit_subject or older.commit_subject
         return report_path, findings
     return None
+
+
+def repo_inventory_from_csv(path: Path) -> list[RepoInventory]:
+    if not path.exists():
+        return []
+    items: list[RepoInventory] = []
+    try:
+        with path.open("r", encoding="utf-8-sig", newline="") as handle:
+            reader = csv.DictReader(handle)
+            for row in reader:
+                repo = str(row.get("仓库") or "").strip()
+                if not repo:
+                    continue
+                try:
+                    stars = int(row.get("Star数") or "")
+                except ValueError:
+                    stars = None
+                try:
+                    branch_count = int(row.get("全部分支数") or 0)
+                except ValueError:
+                    branch_count = 0
+                try:
+                    candidate_count = int(row.get("候选分支数") or 0)
+                except ValueError:
+                    candidate_count = 0
+                items.append(
+                    RepoInventory(
+                        repo=repo,
+                        url=str(row.get("仓库链接") or f"https://github.com/{repo}"),
+                        source=str(row.get("来源") or "cache"),
+                        stars=stars,
+                        pushed_at=str(row.get("最近推送") or ""),
+                        status=str(row.get("状态") or "缓存"),
+                        branch_count=branch_count,
+                        candidate_count=candidate_count,
+                        note=str(row.get("说明") or "来自缓存"),
+                    )
+                )
+    except OSError:
+        return []
+    return items
+
+
+def merge_findings(cached: list[AuditFinding], fresh: list[AuditFinding]) -> list[AuditFinding]:
+    merged: dict[tuple[str, str, str], AuditFinding] = {}
+    for finding in cached + fresh:
+        key = (finding.repo.lower(), finding.branch, finding.sha)
+        existing = merged.get(key)
+        if existing is None or finding.score > existing.score:
+            merged[key] = finding
+        elif existing is not None and finding.score == existing.score:
+            if not existing.version_label and finding.version_label:
+                existing.version_label = finding.version_label
+            if not existing.commit_date and finding.commit_date:
+                existing.commit_date = finding.commit_date
+            if not existing.commit_subject and finding.commit_subject:
+                existing.commit_subject = finding.commit_subject
+            if not existing.file_findings and finding.file_findings:
+                existing.file_findings = finding.file_findings
+    return sorted(merged.values(), key=lambda item: item.score, reverse=True)
+
+
+def merge_repo_inventory(cached: list[RepoInventory], fresh: list[RepoInventory]) -> list[RepoInventory]:
+    merged: dict[str, RepoInventory] = {item.repo.lower(): item for item in cached}
+    for item in fresh:
+        merged[item.repo.lower()] = item
+    return sorted(
+        merged.values(),
+        key=lambda item: (
+            item.status,
+            item.stars if item.stars is not None else 999999,
+            item.repo.lower(),
+        ),
+    )
+
+
+def prompt_cache_action(cache_path: Path, findings_count: int, repo_count: int) -> tuple[str, int]:
+    print("")
+    print(f"发现最近一次审计缓存: {cache_path}")
+    print(f"缓存结果: 命中 {findings_count} 条，已处理仓库 {repo_count} 个")
+    print("请选择:")
+    print("  1. 使用缓存，不重新扫描")
+    print("  2. 接着扫描后面的新仓库")
+    print("  3. 重新开始扫描")
+    raw = prompt_text("输入 1/2/3，直接回车默认使用缓存: ", "1")
+    if raw in {"2", "继续", "接着", "续扫"}:
+        count_raw = prompt_text("接着扫描多少个新仓库 [100]: ", "100")
+        try:
+            count = max(1, int(count_raw))
+        except ValueError:
+            count = 100
+        return "continue", count
+    if raw in {"3", "重新", "重扫", "restart", "r"}:
+        return "restart", 0
+    return "use", 0
 
 
 def safe_path_name(value: str) -> str:
@@ -1337,6 +1705,20 @@ def existing_codex_entry(repo_dir: Path) -> Path | None:
     return None
 
 
+def is_debug_codex_entry(entry: Path, repo_dir: Path) -> bool:
+    return entry.resolve() == (repo_dir / "codex-rs" / "target" / "debug" / "codex.exe").resolve()
+
+
+def build_status_label(item: dict[str, Any]) -> str:
+    if not item.get("built"):
+        return "未编译"
+    entry = item.get("entry")
+    checkout = item.get("checkout")
+    if entry and checkout and is_debug_codex_entry(Path(entry), Path(checkout)):
+        return "已编译(debug)"
+    return "已编译(release)"
+
+
 def sync_codex_vendor_exe(repo_dir: Path) -> Path | None:
     source = repo_dir / "codex-rs" / "target" / "release" / "codex.exe"
     if not source.exists():
@@ -1375,6 +1757,32 @@ def build_codex_candidate(repo_dir: Path, proxy_mode: str, timeout: int) -> Path
     return vendor_exe
 
 
+def local_git_version(repo_dir: Path) -> tuple[str, str, str, str]:
+    try:
+        proc = subprocess.run(
+            ["git", "log", "-1", "--format=%H%x1f%ci%x1f%s"],
+            cwd=str(repo_dir),
+            text=True,
+            capture_output=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return "", "", "", ""
+    if proc.returncode != 0:
+        return "", "", "", ""
+    parts = proc.stdout.strip().split("\x1f")
+    if len(parts) < 3:
+        return "", "", "", ""
+    sha, date, subject = parts[0].strip(), parts[1].strip(), parts[2].strip()
+    label_parts = [sha[:12]]
+    if date:
+        label_parts.append(date)
+    if subject:
+        label_parts.append(subject[:80])
+    return sha, date, subject, " | ".join(label_parts)
+
+
 def launcher_content(entry: Path, metadata: dict[str, Any] | None = None) -> str:
     metadata = metadata or {}
     if entry.suffix.lower() == ".js":
@@ -1386,7 +1794,7 @@ def launcher_content(entry: Path, metadata: dict[str, Any] | None = None) -> str
         "SETLOCAL",
         f'rem Managed by codex_fork_auditor at {datetime.now().isoformat(timespec="seconds")}',
     ]
-    for key in ("repo", "branch", "sha", "checkout"):
+    for key in ("repo", "branch", "sha", "version_label", "commit_date", "commit_subject", "checkout"):
         value = metadata.get(key)
         if value:
             lines.append(f"rem {key}: {value}")
@@ -1412,7 +1820,7 @@ def powershell_launcher_content(entry: Path, metadata: dict[str, Any] | None = N
         "# Managed by codex_fork_auditor",
         f"# generated_at: {datetime.now().isoformat(timespec='seconds')}",
     ]
-    for key in ("repo", "branch", "sha", "checkout"):
+    for key in ("repo", "branch", "sha", "version_label", "commit_date", "commit_subject", "checkout"):
         value = metadata.get(key)
         if value:
             lines.append(f"# {key}: {value}")
@@ -1444,7 +1852,7 @@ def shell_launcher_content(entry: Path, metadata: dict[str, Any] | None = None) 
         "# Managed by codex_fork_auditor",
         f"# generated_at: {datetime.now().isoformat(timespec='seconds')}",
     ]
-    for key in ("repo", "branch", "sha", "checkout"):
+    for key in ("repo", "branch", "sha", "version_label", "commit_date", "commit_subject", "checkout"):
         value = metadata.get(key)
         if value:
             lines.append(f"# {key}: {value}")
@@ -1512,6 +1920,9 @@ def write_candidate_cmd(
         f"rem Repo: {finding.repo}\r\n"
         f"rem Branch: {finding.branch}\r\n"
         f"rem SHA: {finding.sha}\r\n"
+        f"rem Version: {finding.version_label or finding.sha[:12]}\r\n"
+        f"rem Commit-Date: {finding.commit_date or '-'}\r\n"
+        f"rem Commit-Subject: {finding.commit_subject or '-'}\r\n"
         f"rem Checkout: {target_dir}\r\n"
         f"rem Entry: {entry_text}\r\n"
         f"{command}\r\n"
@@ -1538,13 +1949,17 @@ def load_codexx_history(workdir: Path) -> list[dict[str, Any]]:
         if checkout_resolved in seen:
             continue
         seen.add(checkout_resolved)
+        local_sha, local_date, local_subject, local_label = local_git_version(checkout_resolved)
         entries.append(
             {
                 "entry": entry.resolve() if entry else None,
                 "checkout": checkout_resolved,
                 "repo": manifest.get("repo") or checkout.name,
                 "branch": manifest.get("branch") or "-",
-                "sha": str(manifest.get("sha") or "")[:12],
+                "sha": str(manifest.get("sha") or local_sha or "")[:12],
+                "version_label": str(manifest.get("version_label") or local_label or ""),
+                "commit_date": str(manifest.get("commit_date") or local_date or ""),
+                "commit_subject": str(manifest.get("commit_subject") or local_subject or ""),
                 "source": str(manifest_path),
                 "built": entry is not None,
             }
@@ -1561,13 +1976,17 @@ def load_codexx_history(workdir: Path) -> list[dict[str, Any]]:
             if checkout_resolved in seen:
                 continue
             seen.add(checkout_resolved)
+            local_sha, local_date, local_subject, local_label = local_git_version(checkout_resolved)
             entries.append(
                 {
                     "entry": entry.resolve() if entry else None,
                     "checkout": checkout_resolved,
                     "repo": checkout.name,
                     "branch": "-",
-                    "sha": "",
+                    "sha": local_sha[:12],
+                    "version_label": local_label,
+                    "commit_date": local_date,
+                    "commit_subject": local_subject,
                     "source": "directory-scan",
                     "built": entry is not None,
                 }
@@ -1594,10 +2013,11 @@ def switch_codexx_history(
 
     print("\ncodexx 历史候选:")
     for i, item in enumerate(entries, start=1):
-        status = "已编译" if item.get("built") else "未编译"
+        status = build_status_label(item)
         entry_text = str(item["entry"]) if item.get("entry") else "<选择后自动编译>"
         print(
             f"{i:2d}. [{status}] {item['repo']} / {item['branch']} {item['sha']}\n"
+            f"    版本: {item.get('version_label') or item.get('sha') or '-'}\n"
             f"    文件夹: {item['checkout']}\n"
             f"    可执行: {entry_text}"
         )
@@ -1618,7 +2038,8 @@ def switch_codexx_history(
     selected = entries[selected_index - 1]
     print("\n已选择:")
     print(f"  文件夹: {selected['checkout']}")
-    print(f"  状态: {'已编译' if selected.get('built') else '未编译'}")
+    print(f"  版本: {selected.get('version_label') or selected.get('sha') or '-'}")
+    print(f"  状态: {build_status_label(selected)}")
     print(f"  可执行: {selected['entry'] or '<选择后自动编译>'}")
 
     entry = Path(selected["entry"]) if selected.get("entry") else None
@@ -1641,6 +2062,24 @@ def switch_codexx_history(
         selected["entry"] = entry.resolve()
         selected["built"] = True
         print(f"  编译完成: {selected['entry']}")
+    else:
+        checkout = Path(selected["checkout"])
+        release_exe = checkout / "codex-rs" / "target" / "release" / "codex.exe"
+        cargo_toml = checkout / "codex-rs" / "Cargo.toml"
+        if build_candidate and is_debug_codex_entry(entry, checkout) and cargo_toml.exists() and not release_exe.exists():
+            if index is None and not prompt_yes_no("当前只有 debug 版，是否补编 release 版再切换", default=True):
+                log("继续使用已有 debug 版切换。")
+            else:
+                try:
+                    build_codex_candidate(checkout, proxy_mode, build_timeout)
+                except RuntimeError as exc:
+                    log(f"release 自动编译失败，将继续使用 debug 版: {exc}")
+                else:
+                    refreshed = existing_codex_entry(checkout)
+                    if refreshed is not None:
+                        entry = refreshed
+                        selected["entry"] = entry.resolve()
+                        print(f"  release 编译完成: {selected['entry']}")
 
     if index is None:
         confirm = prompt_text("输入“切换”以备份并重写 codexx.cmd，或直接回车取消: ")
@@ -1652,6 +2091,9 @@ def switch_codexx_history(
         "repo": selected.get("repo"),
         "branch": selected.get("branch"),
         "sha": selected.get("sha"),
+        "version_label": selected.get("version_label"),
+        "commit_date": selected.get("commit_date"),
+        "commit_subject": selected.get("commit_subject"),
         "checkout": str(selected.get("checkout")),
     }
     backup = write_codexx_cmd(codexx_cmd, Path(selected["entry"]), metadata)
@@ -1674,7 +2116,7 @@ def select_finding_interactively(findings: list[AuditFinding], index: int | None
     for i, finding in enumerate(findings[:30], start=1):
         print(
             f"{i:2d}. score={finding.score:<3} {rating_zh(finding.rating)} "
-            f"{finding.repo} / {finding.branch} @ {finding.sha[:12]}"
+            f"{finding.repo} / {finding.branch} @ {finding.version_label or finding.sha[:12]}"
         )
     raw = prompt_text("请选择要 checkout 的候选编号，或直接回车跳过: ")
     if not raw:
@@ -1694,6 +2136,7 @@ def prepare_candidate_checkout(
     index: int | None,
     codexx_cmd: Path,
     proxy_mode: str,
+    http_timeout: int,
     git_timeout: int,
     build_timeout: int,
     build_candidate: bool,
@@ -1722,6 +2165,12 @@ def prepare_candidate_checkout(
         timeout=max(git_timeout * 6, 60),
     )
     run_git_command(["git", "checkout", selected.sha], cwd=target, proxy_mode=proxy_mode, timeout=git_timeout)
+    local_sha, local_date, local_subject, local_label = local_git_version(target)
+    if local_sha:
+        selected.sha = local_sha
+        selected.commit_date = local_date
+        selected.commit_subject = local_subject
+        selected.version_label = local_label
 
     if build_candidate:
         try:
@@ -1737,6 +2186,9 @@ def prepare_candidate_checkout(
         "branch": selected.branch,
         "sha": selected.sha,
         "url": selected.url,
+        "version_label": selected.version_label,
+        "commit_date": selected.commit_date,
+        "commit_subject": selected.commit_subject,
         "checkout": str(target),
         "backup": str(backup) if backup else None,
         "candidate_cmd": str(candidate_cmd),
@@ -1761,6 +2213,9 @@ def prepare_candidate_checkout(
                 "repo": selected.repo,
                 "branch": selected.branch,
                 "sha": selected.sha,
+                "version_label": selected.version_label,
+                "commit_date": selected.commit_date,
+                "commit_subject": selected.commit_subject,
                 "checkout": str(target),
             },
         )
@@ -1793,9 +2248,9 @@ No arguments are required:
 
   python .\audit_codex_forks.py
 
-This default scan targets recent low-star Codex forks:
+This default scan targets recently updated Codex forks and copied repositories:
   recent days          365
-  max stars            50
+  star filter          off
   max repositories     300
   branches per repo    8
   search pages         2
@@ -1805,10 +2260,16 @@ This default scan targets recent low-star Codex forks:
 Common examples
 ---------------
 Faster, smaller scan:
-  python .\audit_codex_forks.py --max-repos 120 --search-pages 1
+  python .\audit_codex_forks.py --quick
 
 Broader scan:
-  python .\audit_codex_forks.py --pages 8 --search-pages 3 --max-repos 600 --full-key-files
+  python .\audit_codex_forks.py --deep
+
+Prefer small/obscure low-star repositories:
+  python .\audit_codex_forks.py --low-star
+
+Force fresh GitHub search instead of query cache:
+  python .\audit_codex_forks.py --refresh-search-cache
 
 Only seed repos and fork API, no GitHub code search:
   python .\audit_codex_forks.py --no-search-github
@@ -1844,11 +2305,13 @@ Chinese detailed help:
     parser.add_argument("--repos-file", type=Path, default=Path("data/repos.txt"), help="Seed repo list. Default: data/repos.txt")
     parser.add_argument("--discover-forks", action="store_true", help="Use GitHub API to enumerate forks. Auto-enabled when a token exists.")
     parser.add_argument("--pages", type=int, default=3, help="Fork API pages to scan. Default: 3")
+    parser.add_argument("--quick", action="store_true", help="Quick preset: fewer repos and one search page.")
+    parser.add_argument("--deep", action="store_true", help="Deep preset: more repos, more search pages, and full key files.")
     parser.add_argument(
         "--search-github",
         action="store_true",
         default=True,
-        help="Use GitHub code search to find recent low-star Codex forks. Default: on",
+        help="Use GitHub code search to find recent Codex forks and non-fork copies. Default: on",
     )
     parser.add_argument(
         "--no-search-github",
@@ -1861,9 +2324,19 @@ Chinese detailed help:
         action="store_true",
         help="Also use broad repository search before Codex layout filtering. Higher noise.",
     )
+    parser.add_argument(
+        "--fork-only-search",
+        action="store_true",
+        help="Limit GitHub code search to repositories marked as forks. Default also searches non-fork copies.",
+    )
     parser.add_argument("--search-pages", type=int, default=2, help="Code-search pages per query. Default: 2")
     parser.add_argument("--recent-days", type=int, default=365, help="Only search repos pushed within this many days. Default: 365")
-    parser.add_argument("--max-stars", type=int, default=50, help="Prefer searched repos below this star count. Default: 50")
+    parser.add_argument("--max-stars", type=int, default=0, help="Only search repos below this star count. 0 disables star filtering. Default: 0")
+    parser.add_argument("--low-star", action="store_true", help="Shortcut for obscure-repo hunting: prefer low-star repos and use --max-stars 50 if no star limit is set.")
+    parser.add_argument("--search-cache-file", type=Path, default=DEFAULT_SEARCH_CACHE_FILE, help="GitHub search result cache file. Default: data/github_search_cache.json")
+    parser.add_argument("--search-cache-ttl-hours", type=int, default=6, help="GitHub search cache freshness window. Default: 6")
+    parser.add_argument("--refresh-search-cache", action="store_true", help="Ignore fresh search cache and refetch GitHub search pages.")
+    parser.add_argument("--no-search-cache", action="store_true", help="Disable GitHub search result cache.")
     parser.add_argument("--max-repos", type=int, default=300, help="Maximum repositories to process. Default: 300")
     parser.add_argument("--max-branches-per-repo", type=int, default=8, help="Maximum candidate branches per repo. Default: 8")
     parser.add_argument("--include-default-branch", action="store_true", default=True, help="Scan main/master too. Default: on")
@@ -1996,12 +2469,40 @@ def main() -> int:
     global DEFAULT_PROXY, DEFAULT_SOCKS_PROXY
     args = parse_args()
     root = Path(__file__).resolve().parent
+    cli_args = set(sys.argv[1:])
+    if args.quick and args.deep:
+        log("同时指定 --quick 和 --deep；按 --deep 处理。")
+        args.quick = False
+    if args.quick:
+        if "--pages" not in cli_args:
+            args.pages = 1
+        if "--search-pages" not in cli_args:
+            args.search_pages = 1
+        if "--max-repos" not in cli_args:
+            args.max_repos = 120
+    if args.deep:
+        if "--pages" not in cli_args:
+            args.pages = 8
+        if "--search-pages" not in cli_args:
+            args.search_pages = 3
+        if "--max-repos" not in cli_args:
+            args.max_repos = 600
+        if "--full-key-files" not in cli_args:
+            args.full_key_files = True
+    if args.low_star and args.max_stars <= 0:
+        args.max_stars = 50
     load_proxy_config(args, root)
     DEFAULT_PROXY = args.proxy_url
     DEFAULT_SOCKS_PROXY = args.socks_proxy_url
     out_dir = args.out_dir
     if not out_dir.is_absolute():
         out_dir = root / out_dir
+    search_cache_file = args.search_cache_file
+    if not search_cache_file.is_absolute():
+        search_cache_file = root / search_cache_file
+    search_cache: dict[str, Any] | None = None
+    if not args.no_search_cache:
+        search_cache = load_search_cache(search_cache_file)
     if args.switch_codexx:
         candidate_workdir = args.candidate_workdir
         if not candidate_workdir.is_absolute():
@@ -2026,28 +2527,43 @@ def main() -> int:
         save_token(secrets_file, token)
         log(f"已保存 token 到: {secrets_file}")
         return 0
+    cached_findings: list[AuditFinding] = []
+    cached_repo_inventory: list[RepoInventory] = []
+    resume_skip_repos: set[str] = set()
+    resume_extra_count: int | None = None
     cache = latest_report_cache(out_dir)
-    if cache and args.prepare_candidate:
+    if cache:
         cache_path, cached_findings = cache
-        if prompt_yes_no(
-            f"发现最近一次审计缓存: {cache_path}，共 {len(cached_findings)} 条结果。是否直接使用缓存",
-            default=True,
-        ):
+        cached_repo_inventory = repo_inventory_from_csv(cache_path.parent / "repo_inventory.csv")
+        cache_action, resume_extra_count = prompt_cache_action(
+            cache_path,
+            len(cached_findings),
+            len(cached_repo_inventory),
+        )
+        if cache_action == "use":
             log(f"已使用缓存结果: {cache_path}")
-            candidate_workdir = args.candidate_workdir
-            if not candidate_workdir.is_absolute():
-                candidate_workdir = root / candidate_workdir
-            prepare_candidate_checkout(
-                findings=cached_findings,
-                workdir=candidate_workdir,
-                index=args.candidate_index,
-                codexx_cmd=args.codexx_cmd,
-                proxy_mode=args.proxy_mode,
-                git_timeout=args.git_timeout,
-                build_timeout=args.build_timeout,
-                build_candidate=args.build_candidate,
-            )
+            if args.prepare_candidate:
+                candidate_workdir = args.candidate_workdir
+                if not candidate_workdir.is_absolute():
+                    candidate_workdir = root / candidate_workdir
+                prepare_candidate_checkout(
+                    findings=cached_findings,
+                    workdir=candidate_workdir,
+                    index=args.candidate_index,
+                    codexx_cmd=args.codexx_cmd,
+                    proxy_mode=args.proxy_mode,
+                    http_timeout=args.timeout,
+                    git_timeout=args.git_timeout,
+                    build_timeout=args.build_timeout,
+                    build_candidate=args.build_candidate,
+                )
             return 0
+        if cache_action == "continue":
+            resume_skip_repos = {item.repo.lower() for item in cached_repo_inventory}
+            log(f"将跳过缓存中已处理仓库 {len(resume_skip_repos)} 个，继续扫描新仓库 {resume_extra_count} 个。")
+        else:
+            cached_findings = []
+            cached_repo_inventory = []
     if args.interactive:
         args = interactive_args(args, root)
     else:
@@ -2117,16 +2633,24 @@ def main() -> int:
                 )
         repo_candidates.extend(discovered)
     if args.search_github:
-        queries = default_code_search_queries(args.recent_days, args.max_stars)
+        queries = default_code_search_queries(
+            args.recent_days,
+            args.max_stars,
+            include_non_fork=not args.fork_only_search,
+        )
+        star_note = f"低 star(<{args.max_stars})" if args.max_stars > 0 else "不限制 star"
         log(
-            "正在通过 GitHub 代码搜索近期低 star Codex 仓库 "
-            f"({len(queries)} 个查询，每个 {args.search_pages} 页)..."
+            f"正在通过 GitHub 代码搜索近期 Codex 仓库/镜像（{star_note}，"
+            f"{len(queries)} 个查询，每个 {args.search_pages} 页)..."
         )
         searched, status = search_github_code_repos(
             queries,
             args.search_pages,
             args.timeout,
             args.proxy_mode,
+            search_cache=search_cache,
+            cache_ttl_hours=args.search_cache_ttl_hours,
+            refresh_cache=args.refresh_search_cache,
         )
         if status == 401:
             log("GitHub 代码搜索返回 401；继续使用 fork/种子仓库。")
@@ -2142,10 +2666,15 @@ def main() -> int:
             args.search_pages,
             args.timeout,
             args.proxy_mode,
+            search_cache=search_cache,
+            cache_ttl_hours=args.search_cache_ttl_hours,
+            refresh_cache=args.refresh_search_cache,
         )
         if status == 401:
             log("GitHub 仓库搜索返回 401；继续使用其他来源。")
         repo_candidates.extend(searched)
+    if search_cache is not None and (args.search_github or args.broad_repo_search):
+        save_search_cache(search_cache_file, search_cache)
     if args.include_base_repo:
         repo_candidates.append(RepoCandidate(args.base_repo, "base-repo"))
     else:
@@ -2154,7 +2683,27 @@ def main() -> int:
             for candidate in repo_candidates
             if candidate.repo.lower() != args.base_repo.lower()
         ]
-    repo_candidates = merge_repo_candidates(repo_candidates)[: args.max_repos]
+    merged_repo_candidates = merge_repo_candidates(
+        repo_candidates,
+        prefer_low_stars=args.low_star or args.max_stars > 0,
+    )
+    if resume_skip_repos:
+        available_resume_candidates = [
+            candidate
+            for candidate in merged_repo_candidates
+            if candidate.repo.lower() not in resume_skip_repos
+        ]
+        requested_resume_count = resume_extra_count or args.max_repos
+        repo_candidates = available_resume_candidates[:requested_resume_count]
+        log(
+            f"续扫请求 {requested_resume_count} 个；发现可续扫新仓库 "
+            f"{len(available_resume_candidates)} 个；本轮加入队列 {len(repo_candidates)} 个。"
+        )
+        if not repo_candidates:
+            log("本轮没有新的仓库可扫：可能是 GitHub 搜索限流、搜索缓存已用尽，或当前查询没有更多结果。")
+            log("建议稍后运行、使用 --refresh-search-cache，或使用 --deep 扩大搜索范围。")
+    else:
+        repo_candidates = merged_repo_candidates[: args.max_repos]
     repo_by_name = {candidate.repo: candidate for candidate in repo_candidates}
     repos = [candidate.repo for candidate in repo_candidates]
     log(f"已加入队列的仓库数: {len(repos)}")
@@ -2268,7 +2817,10 @@ def main() -> int:
                 findings.append(finding)
                 log(f"命中 score={finding.score}: {finding.repo} {finding.branch}")
 
-    findings.sort(key=lambda item: item.score, reverse=True)
+    new_findings_count = len(findings)
+    cached_findings_count = len(cached_findings)
+    findings = merge_findings(cached_findings, findings)
+    repo_inventory = merge_repo_inventory(cached_repo_inventory, repo_inventory)
     repo_inventory.sort(
         key=lambda item: (
             item.status,
@@ -2277,7 +2829,13 @@ def main() -> int:
         )
     )
     run_out_dir = write_reports(findings, repo_inventory, out_dir)
-    log(f"发现结果数: {len(findings)}")
+    if cached_findings_count:
+        log(
+            f"本轮新增命中 {new_findings_count} 条；缓存命中 {cached_findings_count} 条；"
+            f"合并后命中 {len(findings)} 条。"
+        )
+    else:
+        log(f"发现结果数: {len(findings)}")
     log(f"报告已写入: {run_out_dir}")
     if args.prepare_candidate:
         candidate_workdir = args.candidate_workdir
@@ -2289,6 +2847,7 @@ def main() -> int:
             index=args.candidate_index,
             codexx_cmd=args.codexx_cmd,
             proxy_mode=args.proxy_mode,
+            http_timeout=args.timeout,
             git_timeout=args.git_timeout,
             build_timeout=args.build_timeout,
             build_candidate=args.build_candidate,
@@ -2297,4 +2856,8 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        raise SystemExit(main())
+    except KeyboardInterrupt:
+        print("\n已取消。")
+        raise SystemExit(130)

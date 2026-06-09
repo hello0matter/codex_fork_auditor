@@ -50,24 +50,26 @@ From this folder:
 python .\audit_codex_forks.py
 ```
 
-No arguments are needed for the recommended scan. The default mode already
-targets recent low-star Codex forks:
+No arguments are needed for the recommended scan. The default mode targets
+recently updated Codex forks and non-fork copies:
 
 - Recent window: 365 days
-- Star filter: under 50 stars
+- Star filter: off by default
 - Repository cap: 300
 - Branch cap per repository: 8
-- Search mode: Codex key-path code search plus fork discovery
+- Search mode: Codex key-path code search, non-fork copy search, plus fork discovery
 
 Default behavior:
 
 1. Read `GITHUB_TOKEN` from the environment or `data/secrets.json`.
 2. If no token exists, ask once and automatically save it.
-3. If a token exists, automatically discover public forks from GitHub.
-4. Also use GitHub code search to find recent, low-star public Codex forks with Codex key paths.
-5. Sort candidates by low stars first, then recent push time.
-6. Skip the official `openai/codex` repository by default.
-7. Scan suspicious branches plus `main`/`master` by default and write reports.
+3. If a previous report cache exists, ask whether to use it, continue from it, or restart.
+4. If you continue from cache, ask how many new repositories to scan and skip cached repositories.
+5. If a token exists, automatically discover public forks from GitHub.
+6. Also use GitHub code search to find recent public Codex forks and non-fork copies with Codex key paths.
+7. Sort candidates by recent push time first; use `--low-star` for obscure low-star hunting.
+8. Skip the official `openai/codex` repository by default.
+9. Scan suspicious branches plus `main`/`master` by default and write reports.
 
 Chinese help:
 
@@ -81,44 +83,81 @@ Advanced interactive mode:
 python .\audit_codex_forks.py --interactive
 ```
 
+Quick scan:
+
+```powershell
+python .\audit_codex_forks.py --quick
+```
+
+Deep scan:
+
+```powershell
+python .\audit_codex_forks.py --deep
+```
+
 Skip token prompt and scan only seed repositories:
 
 ```powershell
 python .\audit_codex_forks.py --no-token-prompt --proxy-mode proxy
 ```
 
-Speed-oriented scan:
-
-```powershell
-python .\audit_codex_forks.py --list-workers 32 --workers 24
-```
-
-The speed-oriented settings are also the current defaults, so this command is
-only useful if you changed the defaults locally.
-
-By default, it only scans suspicious branch names and a small core set of key
-files, and now includes default branches like `main`/`master` to catch quiet
-forks that do not advertise bypasses in branch names. To only scan suspicious
-branch names, add `--suspicious-branches-only`. To scan the larger key-file
-list, add `--full-key-files`.
+By default, it scans suspicious branch names plus `main`/`master`, and reads a
+small core set of key files. This catches quiet forks that do not advertise
+bypasses in branch names. To only scan suspicious branch names, add
+`--suspicious-branches-only`. To scan the larger key-file list, add
+`--full-key-files`.
 
 The default scan compares each key file against official `openai/codex` `main`
 and scores only the fork's inserted or replaced lines. If you want the older,
 noisier behavior that scans whole files, add `--scan-full-file`.
 
-Recent low-star code search is enabled by default. Tune it with:
+Recent code search is enabled by default and now searches both GitHub forks and
+non-fork copies/mirrors. Tune the search window with:
 
 ```powershell
-python .\audit_codex_forks.py --recent-days 180 --max-stars 30 --search-pages 2 --max-repos 600
+python .\audit_codex_forks.py --recent-days 180 --search-pages 2 --max-repos 600
 ```
 
 You usually do not need that command. It is only for narrowing or widening the
 default search window.
 
+If you specifically want obscure low-star candidates, use:
+
+```powershell
+python .\audit_codex_forks.py --low-star
+```
+
+`--low-star` prefers low-star repositories and uses `--max-stars 50` unless you
+set a different star limit.
+
+When a cache exists, the prompt offers three choices:
+
+- `1` uses the cache and skips scanning.
+- `2` continues scanning new repositories after the cached repository list.
+- `3` restarts from the beginning.
+
+Continuing from cache writes a new timestamped report that combines old cached
+findings with newly scanned findings, so the continuation is cached too.
+
+GitHub search results are also cached in `data/github_search_cache.json`.
+Identical query/page requests are reused for 6 hours by default, and stale
+cached results are used as a fallback if GitHub rate-limits a search request.
+Force a fresh search with:
+
+```powershell
+python .\audit_codex_forks.py --refresh-search-cache
+```
+
 Disable GitHub code search and only use seed repos plus fork discovery:
 
 ```powershell
 python .\audit_codex_forks.py --no-search-github
+```
+
+Return to the older fork-only code search:
+
+```powershell
+python .\audit_codex_forks.py --fork-only-search
 ```
 
 After every scan, the script asks whether to prepare one selected finding as a
@@ -241,8 +280,8 @@ malicious, or useful.
 This is not running or testing fork code. It performs read-only triage:
 
 1. Discover fork repositories from GitHub.
-2. Search recent low-star public repositories by Codex key paths.
-3. Sort repositories by low star count and recent push time.
+2. Search recent public repositories by Codex key paths, including non-fork copies.
+3. Sort repositories by recent push time by default; `--low-star` switches to low-star priority.
 4. List branch names with `git ls-remote`.
 5. Keep suspicious branch names plus `main`/`master` by default.
 6. Skip repositories that do not contain Codex key paths by default.
