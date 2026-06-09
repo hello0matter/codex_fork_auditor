@@ -147,16 +147,18 @@ Non-interactive top finding checkout:
 python .\audit_codex_forks.py --prepare-candidate --candidate-index 1
 ```
 
-Switch between local built historical `codexx` checkouts:
+Switch between historical `codexx` checkouts:
 
 ```powershell
 python .\audit_codex_forks.py --switch
 ```
 
-The switch menu is in Chinese and shows the folder and executable for each
-candidate. After you select one, type `切换` to confirm. The current
-`C:\Users\Administrator\AppData\Roaming\npm\codexx.cmd` is backed up before it
-is rewritten.
+The switch menu is in Chinese and shows the folder, build status, and executable
+for each candidate. If the selected checkout is not built yet, the script runs
+`cargo build --release -p codex-cli --bin codex`, syncs the vendor executable,
+then asks you to type `切换` to confirm. The current
+`C:\Users\Administrator\AppData\Roaming\npm\codexx.cmd`, plus sibling
+`codexx.ps1` and `codexx`, are backed up before they are rewritten.
 
 By default, repositories are skipped unless a Codex key path such as
 `codex-rs/core/src/guardian/policy.md` or `codex-rs/core/src/exec_policy.rs`

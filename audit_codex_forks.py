@@ -468,6 +468,18 @@ def prompt_yes_no(message: str, default: bool = False) -> bool:
     return raw in {"1", "y", "yes", "是", "对", "好", "使用", "确认", "切换"}
 
 
+def prompt_text(message: str, default: str = "") -> str:
+    try:
+        raw = input(message)
+    except EOFError:
+        if default:
+            log(f"无交互输入，使用默认值: {default}")
+        else:
+            log("无交互输入，按空输入处理。")
+        return default
+    return raw.strip()
+
+
 def ensure_token(args: argparse.Namespace, root: Path, *, prompt_if_missing: bool) -> bool:
     secrets_file = args.secrets_file
     if not secrets_file.is_absolute():
@@ -1394,10 +1406,75 @@ def launcher_content(entry: Path, metadata: dict[str, Any] | None = None) -> str
     return "\r\n".join(lines)
 
 
+def powershell_launcher_content(entry: Path, metadata: dict[str, Any] | None = None) -> str:
+    metadata = metadata or {}
+    lines = [
+        "# Managed by codex_fork_auditor",
+        f"# generated_at: {datetime.now().isoformat(timespec='seconds')}",
+    ]
+    for key in ("repo", "branch", "sha", "checkout"):
+        value = metadata.get(key)
+        if value:
+            lines.append(f"# {key}: {value}")
+    lines.extend(
+        [
+            f"$binary = {json.dumps(str(entry), ensure_ascii=False)}",
+            "",
+            "if (-not (Test-Path $binary)) {",
+            '  throw "codexx binary not found: $binary"',
+            "}",
+            "",
+            "if ($MyInvocation.ExpectingInput) {",
+            "  $input | & $binary $args",
+            "} else {",
+            "  & $binary $args",
+            "}",
+            "",
+            "exit $LASTEXITCODE",
+            "",
+        ]
+    )
+    return "\r\n".join(lines)
+
+
+def shell_launcher_content(entry: Path, metadata: dict[str, Any] | None = None) -> str:
+    metadata = metadata or {}
+    lines = [
+        "#!/bin/sh",
+        "# Managed by codex_fork_auditor",
+        f"# generated_at: {datetime.now().isoformat(timespec='seconds')}",
+    ]
+    for key in ("repo", "branch", "sha", "checkout"):
+        value = metadata.get(key)
+        if value:
+            lines.append(f"# {key}: {value}")
+    quoted_entry = "'" + str(entry).replace("'", "'\"'\"'") + "'"
+    lines.extend(
+        [
+            f"binary={quoted_entry}",
+            "",
+            'if [ ! -f "$binary" ]; then',
+            '  echo "codexx binary not found: $binary" >&2',
+            "  exit 1",
+            "fi",
+            "",
+            'exec "$binary" "$@"',
+            "",
+        ]
+    )
+    return "\n".join(lines)
+
+
 def write_codexx_cmd(codexx_cmd: Path, entry: Path, metadata: dict[str, Any]) -> Path | None:
     codexx_cmd.parent.mkdir(parents=True, exist_ok=True)
     backup = backup_file(codexx_cmd)
     codexx_cmd.write_text(launcher_content(entry, metadata), encoding="utf-8")
+    ps1_path = codexx_cmd.with_suffix(".ps1")
+    sh_path = codexx_cmd.with_suffix("")
+    backup_file(ps1_path)
+    backup_file(sh_path)
+    ps1_path.write_text(powershell_launcher_content(entry, metadata), encoding="utf-8")
+    sh_path.write_text(shell_launcher_content(entry, metadata), encoding="utf-8")
     return backup
 
 
@@ -1457,20 +1534,19 @@ def load_codexx_history(workdir: Path) -> list[dict[str, Any]]:
         if not checkout.is_absolute():
             checkout = (manifest_path.parent / checkout).resolve()
         entry = existing_codex_entry(checkout)
-        if not entry:
+        checkout_resolved = checkout.resolve()
+        if checkout_resolved in seen:
             continue
-        resolved = entry.resolve()
-        if resolved in seen:
-            continue
-        seen.add(resolved)
+        seen.add(checkout_resolved)
         entries.append(
             {
-                "entry": resolved,
-                "checkout": checkout.resolve(),
+                "entry": entry.resolve() if entry else None,
+                "checkout": checkout_resolved,
                 "repo": manifest.get("repo") or checkout.name,
                 "branch": manifest.get("branch") or "-",
                 "sha": str(manifest.get("sha") or "")[:12],
                 "source": str(manifest_path),
+                "built": entry is not None,
             }
         )
 
@@ -1478,21 +1554,22 @@ def load_codexx_history(workdir: Path) -> list[dict[str, Any]]:
         for checkout in workdir.iterdir():
             if not checkout.is_dir() or checkout.name == "_backups":
                 continue
+            if not (checkout / "codex-rs" / "Cargo.toml").exists() and not existing_codex_entry(checkout):
+                continue
             entry = existing_codex_entry(checkout)
-            if not entry:
+            checkout_resolved = checkout.resolve()
+            if checkout_resolved in seen:
                 continue
-            resolved = entry.resolve()
-            if resolved in seen:
-                continue
-            seen.add(resolved)
+            seen.add(checkout_resolved)
             entries.append(
                 {
-                    "entry": resolved,
-                    "checkout": checkout.resolve(),
+                    "entry": entry.resolve() if entry else None,
+                    "checkout": checkout_resolved,
                     "repo": checkout.name,
                     "branch": "-",
                     "sha": "",
                     "source": "directory-scan",
+                    "built": entry is not None,
                 }
             )
 
@@ -1500,25 +1577,34 @@ def load_codexx_history(workdir: Path) -> list[dict[str, Any]]:
     return entries
 
 
-def switch_codexx_history(workdir: Path, codexx_cmd: Path, index: int | None) -> None:
+def switch_codexx_history(
+    workdir: Path,
+    codexx_cmd: Path,
+    index: int | None,
+    proxy_mode: str,
+    build_timeout: int,
+    build_candidate: bool,
+) -> None:
     workdir = workdir.resolve()
     entries = load_codexx_history(workdir)
     if not entries:
-        log(f"未在目录下找到已编译的 codexx 历史候选: {workdir}")
-        log("期望存在类似 codex-rs\\target\\release\\codex.exe 的可执行文件。")
+        log(f"未在目录下找到 codexx 历史候选: {workdir}")
+        log("期望存在 candidate_checkout_manifest.json 或 codex-rs\\Cargo.toml。")
         return
 
-    print("\n已编译的 codexx 历史候选:")
+    print("\ncodexx 历史候选:")
     for i, item in enumerate(entries, start=1):
+        status = "已编译" if item.get("built") else "未编译"
+        entry_text = str(item["entry"]) if item.get("entry") else "<选择后自动编译>"
         print(
-            f"{i:2d}. {item['repo']} / {item['branch']} {item['sha']}\n"
+            f"{i:2d}. [{status}] {item['repo']} / {item['branch']} {item['sha']}\n"
             f"    文件夹: {item['checkout']}\n"
-            f"    可执行: {item['entry']}"
+            f"    可执行: {entry_text}"
         )
 
     selected_index = index
     if selected_index is None:
-        raw = input("请选择要切换到的候选编号，或直接回车取消: ").strip()
+        raw = prompt_text("请选择要切换到的候选编号，或直接回车取消: ")
         if not raw:
             log("已取消切换。")
             return
@@ -1532,9 +1618,32 @@ def switch_codexx_history(workdir: Path, codexx_cmd: Path, index: int | None) ->
     selected = entries[selected_index - 1]
     print("\n已选择:")
     print(f"  文件夹: {selected['checkout']}")
-    print(f"  可执行: {selected['entry']}")
+    print(f"  状态: {'已编译' if selected.get('built') else '未编译'}")
+    print(f"  可执行: {selected['entry'] or '<选择后自动编译>'}")
+
+    entry = Path(selected["entry"]) if selected.get("entry") else None
+    if entry is None or not entry.exists():
+        if not build_candidate:
+            log("该候选尚未编译，且已关闭自动编译。")
+            return
+        if index is None and not prompt_yes_no("该候选尚未编译，是否现在自动编译", default=True):
+            log("已取消切换。")
+            return
+        try:
+            build_codex_candidate(Path(selected["checkout"]), proxy_mode, build_timeout)
+        except RuntimeError as exc:
+            log(f"自动编译失败: {exc}")
+            return
+        entry = existing_codex_entry(Path(selected["checkout"]))
+        if entry is None:
+            log("编译后仍未找到可执行文件，无法切换。")
+            return
+        selected["entry"] = entry.resolve()
+        selected["built"] = True
+        print(f"  编译完成: {selected['entry']}")
+
     if index is None:
-        confirm = input("输入“切换”以备份并重写 codexx.cmd，或直接回车取消: ").strip()
+        confirm = prompt_text("输入“切换”以备份并重写 codexx.cmd，或直接回车取消: ")
         if confirm != "切换":
             log("已取消切换。")
             return
@@ -1567,7 +1676,7 @@ def select_finding_interactively(findings: list[AuditFinding], index: int | None
             f"{i:2d}. score={finding.score:<3} {rating_zh(finding.rating)} "
             f"{finding.repo} / {finding.branch} @ {finding.sha[:12]}"
         )
-    raw = input("请选择要 checkout 的候选编号，或直接回车跳过: ").strip()
+    raw = prompt_text("请选择要 checkout 的候选编号，或直接回车跳过: ")
     if not raw:
         return None
     try:
@@ -1594,7 +1703,7 @@ def prepare_candidate_checkout(
         return
 
     if index is None:
-        raw_workdir = input(f"候选 checkout 工作目录 [{workdir}]: ").strip()
+        raw_workdir = prompt_text(f"候选 checkout 工作目录 [{workdir}]: ")
         if raw_workdir:
             workdir = Path(raw_workdir).expanduser()
     workdir = workdir.resolve()
@@ -1710,7 +1819,7 @@ Show LOW branch-name-only hits too:
 Prepare, build, and optionally switch one selected candidate:
   python .\audit_codex_forks.py
 
-Switch between local built codexx candidates:
+Switch between local codexx candidates, building missing ones:
   python .\audit_codex_forks.py --switch
 
 Chinese detailed help:
@@ -1851,8 +1960,8 @@ Chinese detailed help:
         dest="switch_codexx",
         action="store_true",
         help=(
-            "Switch codexx.cmd between local built candidates under "
-            "--candidate-workdir. Shows the folder for each candidate."
+            "Switch codexx.cmd between local candidates under --candidate-workdir. "
+            "Shows folders and builds missing executables before switching."
         ),
     )
     parser.add_argument(
@@ -1901,6 +2010,9 @@ def main() -> int:
             workdir=candidate_workdir,
             codexx_cmd=args.codexx_cmd,
             index=args.switch_index,
+            proxy_mode=args.proxy_mode,
+            build_timeout=args.build_timeout,
+            build_candidate=args.build_candidate,
         )
         return 0
     if args.save_github_token:
